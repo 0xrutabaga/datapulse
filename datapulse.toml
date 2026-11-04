@@ -1,0 +1,12 @@
+# Data-quality thresholds for `datapulse run --config datapulse.toml` / `datapulse check`.
+# Every key is optional; unknown keys are rejected. Defaults are in src/datapulse/config.py.
+[checks]
+min_orders = 100
+max_quarantine_rate = 0.05      # quarantined lines / lines read, over loaded files
+max_rejected_files = 1          # files rejected for schema drift
+max_freshness_lag_hours = 24    # as_of minus the newest event_time in `orders`
+amount_min = 0
+amount_max = 100000
+
+[checks.max_null_rate]
+discount_code = 0.9
