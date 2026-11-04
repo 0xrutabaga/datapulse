@@ -209,7 +209,7 @@ uv run mypy src tests
 uv run pytest -q
 ```
 
-73 tests. What they cover:
+74 tests. What they cover:
 
 - `tests/test_validation.py`, `tests/test_ingest.py`, `tests/test_dedup.py`: field rules and
   quarantine reasons, line numbers, CRLF and BOM input, bad UTF-8, broken JSON, schema drift
