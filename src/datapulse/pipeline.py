@@ -51,7 +51,8 @@ def process_file(con: duckdb.DuckDBPyConnection, path: Path) -> FileOutcome:
     seen = store.find_by_hash(con, digest)
     if seen is not None:
         if seen.file_name == path.name:
-            return FileOutcome(path.name, "already_loaded")
+            detail = "previously rejected" if seen.status == "rejected" else ""
+            return FileOutcome(path.name, "already_loaded", detail)
         store.record_duplicate_drop(con, path.name, digest, seen)
         return FileOutcome(path.name, "duplicate_drop", f"same content as {seen.file_name}")
 

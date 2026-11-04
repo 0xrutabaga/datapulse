@@ -142,13 +142,14 @@ def connect(db_path: Path, *, read_only: bool = False) -> Iterator[duckdb.DuckDB
 class ManifestEntry:
     file_seq: int
     file_name: str
+    status: str
 
 
 def find_by_hash(con: duckdb.DuckDBPyConnection, sha256: str) -> ManifestEntry | None:
     row = con.execute(
-        "SELECT file_seq, file_name FROM manifest WHERE sha256 = ?", [sha256]
+        "SELECT file_seq, file_name, status FROM manifest WHERE sha256 = ?", [sha256]
     ).fetchone()
-    return None if row is None else ManifestEntry(int(row[0]), str(row[1]))
+    return None if row is None else ManifestEntry(int(row[0]), str(row[1]), str(row[2]))
 
 
 def next_file_seq(con: duckdb.DuckDBPyConnection) -> int:
