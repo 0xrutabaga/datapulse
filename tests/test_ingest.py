@@ -107,3 +107,10 @@ def test_empty_and_header_only_files(tmp_path: Path) -> None:
 def test_duplicate_header_rejected(tmp_path: Path) -> None:
     result = read_file(write(tmp_path, "d.csv", HEADER + b",status\n"), "csv", 1)
     assert result.reject_reason == "duplicate column names in header"
+
+
+def test_csv_field_with_embedded_newline_is_quarantined_not_misread(tmp_path: Path) -> None:
+    data = HEADER + b'\nORD-100001,CUS-12345,paid,2,19.98,EUR,2026-01-02T10:00:00Z,"AB\nCD"\n'
+    result = read_file(write(tmp_path, "n.csv", data), "csv", file_seq=1)
+    assert result.valid == []
+    assert {(q.line, q.field) for q in result.quarantine} == {(2, ROW_FIELD), (3, ROW_FIELD)}
