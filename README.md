@@ -249,7 +249,9 @@ dependencies exported from `uv.lock`.
 - **Latest wins replaces the whole row.** There is no field-level merge and no delete events.
 - **One fixed entity** (orders). The schema lives in code; there is no schema registry.
 - **Checks run on the cumulative state**, not per run, and freshness uses the wall clock unless
-  `--as-of` is given.
+  `--as-of` is given. Events dated after `as_of` are not flagged (the lag is just negative).
+- **CI covers Linux only**; Windows behaviour (file locking, paths, line endings) was checked by
+  running the full suite and the demo locally on Windows 11.
 
 ## Future work
 
