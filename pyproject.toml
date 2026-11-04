@@ -1,0 +1,40 @@
+[project]
+name = "datapulse"
+version = "0.1.0"
+description = "Restart-safe incremental data pipeline: CSV/JSONL landing files into DuckDB with validation, quarantine, dedup and data-quality checks."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "0xrutabaga" }]
+requires-python = ">=3.12"
+dependencies = ["duckdb>=2.0", "pydantic>=2.14"]
+
+[project.scripts]
+datapulse = "datapulse.cli:main"
+
+[dependency-groups]
+dev = ["mypy>=2.4", "pytest>=9.2", "ruff>=0.17"]
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is the pytest idiom; subprocess calls in tests run this package's own CLI.
+"tests/**" = ["S101", "S603"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+# Local pipeline state and demo output (generated, never committed)
+*.duckdb
+*.duckdb.wal
+.datapulse-demo/
+landing/
+out/
