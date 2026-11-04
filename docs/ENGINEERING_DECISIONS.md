@@ -34,10 +34,10 @@ in two places.
   result dependent on upsert order. Adding file and line makes the order total.
 - Cost: lineage columns `src_file_seq` and `src_line` are stored in `orders`.
 
-## 3. `file_seq` is assigned inside the transaction
+## 3. `file_seq` is derived from committed state
 
-`next_file_seq` reads `max(file_seq) + 1` after the skip check and the value is only made
-permanent by the commit. A crashed file's number is not consumed, so the rerun assigns the same
+`next_file_seq` reads `max(file_seq) + 1` from the manifest just before the file is parsed, and
+the number becomes permanent only when that file's manifest row commits. A crashed file's number is not consumed, so the rerun assigns the same
 numbers a clean run would, which is required for byte-identical lineage columns. This is safe
 only because DuckDB allows one writing process per database file (see 7).
 

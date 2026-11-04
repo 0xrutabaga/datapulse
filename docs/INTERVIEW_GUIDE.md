@@ -12,7 +12,7 @@ the `UPSERT` into `orders`, then the `manifest` row, then commits. The manifest 
 thing `pipeline.process_file` looks at (via `store.find_by_hash`) to decide a file is done, and it
 becomes visible at the same commit as the data. Killed before `COMMIT`: DuckDB discards the
 uncommitted transaction, the file has no manifest row, and the rerun loads it from scratch with
-the same `file_seq` (assigned by `store.next_file_seq` inside the transaction). Killed after
+the same `file_seq` (`store.next_file_seq` derives it from committed manifest rows). Killed after
 `COMMIT`: the file is complete and the rerun reports it as `already_loaded`.
 
 Evidence: `tests/test_restart_safety.py::test_crash_then_rerun_is_byte_identical_to_clean_run`

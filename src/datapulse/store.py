@@ -119,6 +119,8 @@ def connect(db_path: Path, *, read_only: bool = False) -> Iterator[duckdb.DuckDB
     Closing matters on Windows, where an open DuckDB file cannot be deleted or reopened by
     another process.
     """
+    if not read_only:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path), read_only=read_only)
     try:
         if not read_only:
