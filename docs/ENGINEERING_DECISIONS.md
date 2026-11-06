@@ -43,7 +43,9 @@ only because DuckDB allows one writing process per database file (see 7).
 
 ## 4. Content hash, not file name, identifies a drop
 
-`ingest.sha256_of` hashes the bytes; `manifest.sha256` is `UNIQUE`. A re-sent file under a new
+`pipeline.snapshot` reads the file once; `ingest.sha256_hex` hashes those bytes and
+`ingest.read_file` parses the same bytes, so a file changing on disk cannot pair one version's
+hash with another version's rows. `manifest.sha256` is `UNIQUE`. A re-sent file under a new
 name is recorded in `duplicate_drops` and skipped; a changed file under an old name is a new
 drop. Name-based tracking fails both cases. Cost: two byte-identical files that are really two
 different deliveries cannot both load; for event feeds that is the desired behaviour.
@@ -114,7 +116,50 @@ are all tested end to end. A pinned digest of the seed-42 output
 (`test_golden_digest_for_default_demo_data`) checks that generation is the same on Windows and
 Linux.
 
-## 11. Standard library CLI
+## 11. Producer contract: atomic rename preferred, settle interval as a defence
+
+A content hash cannot tell a half-written file from a finished one: without a contract, the
+partial file loads, its truncated last line is quarantined, and the finished file later loads
+again as a new drop. The contract (README, "Producer contract") prefers write-then-rename, the
+only option that is safe in all cases. For producers that write in place, `pipeline.snapshot`
+requires an mtime older than `settle_seconds` and the same size and mtime before and after the
+read.
+
+- Rejected: a completion marker per file (`a.csv.done`). Reliable, but it adds a second file to
+  every feed and its own ordering problem.
+- Rejected: requiring a trailing newline. A producer that omits it would wait forever.
+- Choice: stop at the first `not_ready` file rather than skip it. Later files wait, so load order
+  stays name order and tie-breaks do not depend on which producer finished first. Cost: a file
+  that never settles blocks those behind it, visibly, as `not_ready` and `waiting`.
+
+## 12. Strict parsing, not pydantic's lax mode
+
+Lax mode reads the number `20260101` as Unix time (1970-08-23), `1_0` as 10 and `5.0` as an
+integer. `schema.py` puts `mode="before"` validators in front of those fields, which accept only
+the forms in `ISO_8601`, `INTEGER` and `DECIMAL`. A value that needs guessing is quarantined.
+Timestamps with more than 6 fractional digits are quarantined rather than truncated, because
+truncation could create ties. Repeated JSON keys fail through `object_pairs_hook`
+(`ingest._no_duplicate_keys`), since `json.loads` would silently keep the last.
+
+## 13. Upper bound on event time
+
+"Latest wins" trusts event time, so one event dated 2099 would pin an order forever and make
+freshness look perfect. `ingest.validate_record` quarantines rows after `as_of` plus
+`[ingest] max_future_skew_hours`, and `quality.run_checks` fails freshness when the newest stored
+event is further ahead than that (for example after loading with a later `as_of`). The reason
+text is fixed and does not contain the limit, so a rerun at another time does not change the
+quarantine bytes for rows that are future in both runs. Cost: the boundary depends on `as_of`, so
+byte-identical reruns need the same `--as-of`, and a quarantined row is not reconsidered once its
+time has passed.
+
+## 14. A duplicate check that can fail
+
+An earlier `duplicate_keys` check counted repeated `order_id` in `orders`, which the primary key
+makes impossible. It was replaced by `duplicate_rate`: valid rows repeating an `order_id` and
+event time already seen in the same file (`manifest.rows_duplicate`), over valid rows. A producer
+that starts double-sending shows up here. Repeats across files are not counted.
+
+## 15. Standard library CLI
 
 `argparse` covers five subcommands; a CLI framework would be a dependency for no new behaviour.
 Exit codes are documented in the README and tested in `tests/test_quality.py`.

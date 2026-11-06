@@ -23,13 +23,20 @@ reason cannot be fixed at the source.
 ## What it does
 
 - **Ingest** `*.csv` and `*.jsonl` files sitting directly in the landing directory, in file name
-  order. Other files (for example `*.part` uploads in progress) are ignored.
-- **Content-hash manifest**: every file's SHA-256 is recorded. A file whose hash is already in
+  order. Other suffixes (for example `*.part`) and names starting with `.` are ignored. Files
+  must follow the [producer contract](#producer-contract).
+- **Content-hash manifest**: each file is read once, and those same bytes are hashed and parsed,
+  so the recorded SHA-256 always describes the rows that were loaded. A file whose hash is already in
   the manifest is skipped: `already_loaded` under the same name, `duplicate_drop` (recorded in
   its own table) under a different name. A changed file with the same name is a new drop.
 - **Validation** with a pydantic model (`src/datapulse/schema.py`): patterns, ranges, enums,
-  required fields, timezone-aware timestamps normalised to UTC, exact decimals (JSON numbers
-  are parsed as `Decimal`, never as binary floats).
+  required fields, exact decimals (JSON numbers are parsed as `Decimal`, never as binary floats).
+  Parsing is strict: timestamps must be ISO 8601 strings with seconds, at most 6 fractional
+  digits and a UTC offset (normalised to UTC); integers and decimals must be plain digits, so
+  `20260101` as a time, `1_0`, `5.0` as a quantity, `1e2` and `NaN` are quarantined. Repeated
+  JSON keys are an error. `null`, `""` and an empty CSV cell all mean "no value".
+- **Future events**: a row dated later than `as_of` plus `max_future_skew_hours` is quarantined,
+  so a bad clock cannot pin an order to a date in 2099.
 - **Quarantine**: invalid rows are stored with file, line, field, reason and the raw line. Valid
   rows in the same file still load. Unreadable lines (bad UTF-8, broken JSON, wrong number of
   CSV fields) are quarantined with field `_row`.
@@ -42,7 +49,9 @@ reason cannot be fixed at the source.
   written in one DuckDB transaction. A crash anywhere before `COMMIT` leaves no trace of that
   file, and the rerun loads it again.
 - **Data-quality checks** with thresholds from TOML: row count, quarantine rate, rejected files,
-  null rates, amount range, freshness against `--as-of`, duplicate keys. The result is written
+  null rates, amount range, freshness against `--as-of` (also fails if the newest event is
+  further ahead of `as_of` than the allowed skew), and duplicate rate (valid rows repeating an
+  `order_id` and event time already seen in the same file). The result is written
   as a JSON report; any failing check makes `run` and `check` exit with code 1.
 - **Seeded generator** for test data that contains each of the problems above.
 
@@ -51,11 +60,12 @@ reason cannot be fixed at the source.
 ```mermaid
 flowchart TD
     A["landing dir: *.csv, *.jsonl"] --> B["pipeline.discover<br/>sorted by file name"]
-    B --> C["ingest.sha256_of"]
+    B --> C["pipeline.snapshot: settled and stable?<br/>read once, ingest.sha256_hex"]
+    C -- "no" --> Z["not_ready: stop, retry next run"]
     C --> D{"store.find_by_hash"}
     D -- "same name" --> E["already_loaded: skip"]
     D -- "other name" --> F["store.record_duplicate_drop"]
-    D -- "new hash" --> G["ingest.read_file<br/>parse lines, check_columns"]
+    D -- "new hash" --> G["ingest.read_file(bytes)<br/>parse lines, check_columns"]
     G --> H["ingest.validate_record<br/>pydantic OrderEvent"]
     H --> I["dedup.latest_per_key"]
     subgraph TX ["store.load_file: one transaction per file"]
@@ -81,7 +91,7 @@ insert, `COMMIT`. The manifest row is what marks a file as done. Crash points
 | `ingest.py` | hashing, line-oriented CSV/JSONL parsing, column checks, row validation |
 | `dedup.py` | `latest_per_key` |
 | `store.py` | DuckDB DDL, `load_file` transaction, upsert SQL, manifest |
-| `pipeline.py` | discovery and per-file decisions |
+| `pipeline.py` | discovery, producer contract (`snapshot`) and per-file decisions |
 | `quality.py` | checks and the JSON report |
 | `export.py` | deterministic CSV export of every table |
 | `crash.py` | `DATAPULSE_CRASH_AT` crash injection |
@@ -153,11 +163,11 @@ Excerpt of `uv run datapulse demo` output (complete and deterministic for seed 4
   manifest after crash: 4 files committed; orders_2026-01-05.csv is not among them
 
 [5/6] Compare outputs: clean run vs crash + rerun (table exports and DQ report)
-  manifest.csv         c70f498debb7d427  identical
+  manifest.csv         d547d38ad959634f  identical
   duplicate_drops.csv  42b0916cadfdb44b  identical
-  quarantine.csv       f790f7d265037261  identical
+  quarantine.csv       5f8188b1be7cab01  identical
   orders.csv           f3cc63725b654d49  identical
-  report.json          a8e4adadfca06073  identical
+  report.json          38cdd5dd4086fa64  identical
 ```
 
 "stale" counts valid rows that lost to newer state already in the warehouse (late data).
@@ -178,27 +188,55 @@ A quarantine row as exported in `out/quarantine.csv`:
 
 ```text
 file_seq,file_name,line,field,reason,raw
-1,orders_2026-01-01.csv,39,amount,Input should be a valid decimal,"ORD-100028,CUS-55508,placed,1,""12,50"",THB,2026-01-01T18:49:00Z,"
+1,orders_2026-01-01.csv,39,amount,must be a decimal number like 19.99,"ORD-100028,CUS-55508,placed,1,""12,50"",THB,2026-01-01T18:49:00Z,"
 ```
 
 Exit codes: `0` success, `1` a data-quality check failed, `2` bad arguments, `3` runtime error
 (missing landing directory, invalid config, database locked by another process), `86` injected
-crash.
+crash. A run that stops at a `not_ready` file still exits on its checks alone; the remaining
+files load on a later run.
 
 Configuration (`datapulse.toml`, every key optional, unknown keys rejected):
 
 ```toml
+[ingest]
+max_future_skew_hours = 1
+settle_seconds = 5
+
 [checks]
 min_orders = 100
 max_quarantine_rate = 0.05
 max_rejected_files = 1
 max_freshness_lag_hours = 24
+max_duplicate_rate = 0.1
 amount_min = 0
 amount_max = 100000
 
 [checks.max_null_rate]
 discount_code = 0.9
 ```
+
+## Producer contract
+
+datapulse should only read a file that is complete, so producers must do one of these:
+
+1. **Preferred:** write under a name the pipeline ignores (`orders.csv.part` or `.orders.csv`),
+   then rename to the final name in the same directory. A rename is atomic on one file system.
+2. Write in place, without pausing for longer than the settle interval: a file is read only once
+   its mtime is at least `settle_seconds` old (default 5, set in `[ingest]` or with
+   `--settle-seconds`).
+
+`pipeline.snapshot` enforces the second rule and also compares size and mtime before and after
+the read. A file that fails either test is reported as `not_ready`, nothing is written for it,
+and the run stops there: later files are reported as `waiting`, so files always load in name
+order. The next run tries again.
+
+The settle interval is a heuristic, not a guarantee. A producer that pauses for longer than the
+interval, or that preserves an old mtime while writing (`cp -p`, some sync tools), can still
+expose a partial file. A clock difference between producer and pipeline on a network share
+shifts the interval, and a file with an mtime in the future waits until that time. Only option
+1 is safe in all these cases. Changing the content of a file that has already loaded makes it a
+new drop.
 
 ## Testing
 
@@ -209,7 +247,7 @@ uv run mypy src tests
 uv run pytest -q
 ```
 
-74 tests. What they cover:
+105 tests. What they cover:
 
 - `tests/test_validation.py`, `tests/test_ingest.py`, `tests/test_dedup.py`: field rules and
   quarantine reasons, line numbers, CRLF and BOM input, bad UTF-8, broken JSON, schema drift
@@ -224,6 +262,9 @@ uv run pytest -q
   byte-identical to a clean run. Also three successive crashes on different files.
 - `tests/test_quality.py`: each threshold can fail on its own, freshness follows `--as-of`,
   config validation, CLI exit codes 1/2/3, a second writer refused while the database is open.
+- `tests/test_review_regressions.py`: defects found in independent review: a file changing
+  between hash and parse, half-written files, values lax parsing would coerce, repeated JSON
+  keys, future events, the duplicate-rate check, duplicate-drop history.
 - `tests/test_generator_and_demo.py`: same seed gives the same bytes, a pinned digest for seed
   42 (run on Windows locally and Linux in CI), and the demo end to end.
 
@@ -240,16 +281,29 @@ dependencies exported from `uv.lock`.
 - **CSV fields with embedded newlines are not supported**, because parsing is per physical line
   to report exact line numbers. Such a row is quarantined as malformed.
 - **The byte-identical guarantee covers the exports and the report**, not the `.duckdb` file,
-  whose internal layout depends on write history.
+  whose internal layout depends on write history. It also assumes the same `--as-of` for both
+  runs: `as_of` is in the report, and it decides which rows count as future events. Without
+  `--as-of` each run uses the current time.
+- **Hashes are over raw bytes.** The same rows with CRLF instead of LF, or with a BOM, are a new
+  drop: `rows_read` counts them again, quarantine rows repeat under the new `file_seq`, lineage
+  columns move to the new file, and rows that tie on event time win again, which can undo a
+  later restatement.
 - **Tie-break order is load order.** `file_seq` is assigned when a file is loaded. Files in one
   run load in name order, so producers should name files so that name order matches delivery
-  order; a file delivered in a later run always counts as later.
+  order; a file delivered in a later run always counts as later. So for events with equal
+  event time, an incremental history and a full rebuild from the same files can differ if a
+  file with an earlier name arrived later.
 - **Rejected and quarantined data is not replayed.** Fixing a rejected file means dropping a
-  corrected file (new hash). There is no command to re-validate quarantined rows.
+  corrected file (new hash). There is no command to re-validate quarantined rows, so an event
+  quarantined as future stays quarantined after that time has passed.
+- **Sub-microsecond timestamps are quarantined**, not rounded: DuckDB `TIMESTAMP` stores
+  microseconds, and truncating could create false ties.
+- **No warehouse migrations.** The schema version is checked on open; a database from an earlier
+  version (1) is refused with exit code 3 and must be rebuilt from the landing files.
 - **Latest wins replaces the whole row.** There is no field-level merge and no delete events.
 - **One fixed entity** (orders). The schema lives in code; there is no schema registry.
 - **Checks run on the cumulative state**, not per run, and freshness uses the wall clock unless
-  `--as-of` is given. Events dated after `as_of` are not flagged (the lag is just negative).
+  `--as-of` is given.
 - **CI covers Linux only**; Windows behaviour (file locking, paths, line endings) was checked by
   running the full suite and the demo locally on Windows 11.
 

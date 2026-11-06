@@ -66,7 +66,7 @@ handling, `file_seq` assignment and the SQL upsert together. Unit tests in
 
 In order:
 
-1. `ingest.read_file` reads each file whole with `Path.read_bytes`, and `load_file` inserts staging
+1. `pipeline.snapshot` reads each file whole with `Path.read_bytes`, and `load_file` inserts staging
    rows with `executemany`. Memory and insert speed are the first limits. I would stream lines
    and bulk insert through Arrow, or let DuckDB's `read_csv` / `read_json` load staging and keep
    Python for validation errors only. I have not measured throughput, so I would write a
@@ -81,7 +81,9 @@ In order:
 | Choice | Gain | Cost |
 | --- | --- | --- |
 | Manifest in the same transaction (`store.load_file`) | Crash anywhere is safe | One transaction per file |
-| Hash-based manifest (`ingest.sha256_of`) | Re-drops detected regardless of name | Identical bytes can never load twice |
+| Hash-based manifest (`ingest.sha256_hex`) | Re-drops detected regardless of name | Identical bytes can never load twice; a CRLF variant counts as new |
+| Settle interval, stop at first `not_ready` (`pipeline.snapshot`, `pipeline.run`) | In-place writers rarely expose partial files; load order stays name order | Heuristic only; one stuck file blocks those behind it |
+| Quarantine events past `as_of` + skew (`ingest.validate_record`) | A bad clock cannot pin an order | The result depends on `as_of` |
 | Line-oriented parsing (`ingest._physical_lines`) | Exact line numbers; one bad byte affects one line | No embedded newlines in CSV fields |
 | Reject on missing column, tolerate extra (`ingest.check_columns`) | Contract breaks are loud | A fixed file must be re-sent |
 | Report from state only (`quality.run_checks`) | Byte-comparable reports | No per-run history in the report |

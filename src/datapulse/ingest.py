@@ -192,7 +192,7 @@ def validate_record(
         reasons: dict[str, list[str]] = {}
         for err in exc.errors(include_url=False):
             name = ".".join(str(part) for part in err["loc"]) or ROW_FIELD
-            reasons.setdefault(name, []).append(err["msg"])
+            reasons.setdefault(name, []).append(err["msg"].removeprefix("Value error, "))
         return [
             QuarantineEntry(record.line, name, "; ".join(msgs), record.raw)
             for name, msgs in sorted(reasons.items())

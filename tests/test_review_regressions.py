@@ -280,3 +280,27 @@ def test_duplicate_drop_history_is_kept_per_content(tmp_path: Path) -> None:
         ("retry.csv", "a.csv"),
         ("retry.csv", "b.csv"),
     ]  # fmt: skip
+
+
+def test_database_from_an_earlier_schema_version_is_refused(tmp_path: Path) -> None:
+    db = tmp_path / "old.duckdb"
+    with store.connect(db) as con:
+        con.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+    proc = run_cli("run", "--landing", str(tmp_path), "--db", str(db))
+    assert proc.returncode == 3
+    assert "warehouse schema version 1" in proc.stderr
+
+
+def test_crlf_variant_is_a_new_drop_as_documented(tmp_path: Path) -> None:
+    """Documents a known limitation: hashes are over raw bytes (README, Limitations)."""
+    landing = tmp_path / "landing"
+    db = tmp_path / "w.duckdb"
+    text = HEADER + row(1, "placed", "2026-01-01T00:00:00Z")
+    landed(landing / "a.csv", text)
+    pipeline.run(landing, db, OPTS)
+    (landing / "b.csv").write_bytes(text.replace("\n", "\r\n").encode())
+    assert [o.action for o in pipeline.run(landing, db, OPTS).outcomes] == [
+        "already_loaded",
+        "loaded",
+    ]
+    assert table(db, "SELECT status, src_file_seq FROM orders") == [("placed", 2)]
