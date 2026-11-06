@@ -13,7 +13,7 @@ from datapulse.crash import maybe_crash
 from datapulse.dedup import latest_per_key
 from datapulse.ingest import FileFormat, FileResult
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -31,13 +31,15 @@ CREATE TABLE IF NOT EXISTS manifest (
     rows_quarantined INTEGER NOT NULL,
     rows_superseded INTEGER NOT NULL,
     rows_stale INTEGER NOT NULL,
+    rows_duplicate INTEGER NOT NULL,
     extra_columns VARCHAR NOT NULL,
     reject_reason VARCHAR
 );
 CREATE TABLE IF NOT EXISTS duplicate_drops (
-    file_name VARCHAR PRIMARY KEY,
+    file_name VARCHAR NOT NULL,
     sha256 VARCHAR NOT NULL,
-    original_file_seq INTEGER NOT NULL
+    original_file_seq INTEGER NOT NULL,
+    PRIMARY KEY (file_name, sha256)
 );
 CREATE TABLE IF NOT EXISTS quarantine (
     file_seq INTEGER NOT NULL,
@@ -186,6 +188,8 @@ def load_file(
     """
     winners = latest_per_key(result.valid)
     superseded = len(result.valid) - len(winners)
+    # Exact re-sends inside the file: same key and same event time as an earlier valid row.
+    duplicates = len(result.valid) - len({(r.order_id, r.event_time) for r in result.valid})
     con.execute(STAGING_DDL)
     con.begin()
     try:
@@ -218,11 +222,12 @@ def load_file(
         maybe_crash("after_upsert", file_name)
 
         con.execute(
-            "INSERT INTO manifest VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO manifest VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 file_seq, sha256, file_name, fmt,
                 "rejected" if result.reject_reason else "loaded",
                 result.rows_read, len(result.valid), result.rows_quarantined, superseded, stale,
+                duplicates,
                 ",".join(result.extra_columns), result.reject_reason,
             ],
         )  # fmt: skip

@@ -6,8 +6,9 @@ One file per day, alternating CSV and JSONL. On top of clean order lifecycles
 * exact duplicate rows, in the same file and in a later file;
 * late data: events delivered one or two files after the day they happened;
 * restatements: the same order and event time re-sent later with a corrected amount;
-* corrupt rows of nine kinds (bad number, negative amount, unknown enum, naive timestamp,
-  missing key, out-of-range quantity, bad currency, truncated row, invalid UTF-8);
+* corrupt rows of eleven kinds (bad number, negative amount, unknown enum, naive timestamp,
+  missing key, out-of-range quantity, bad currency, truncated row, invalid UTF-8, a bare
+  number as timestamp, an event far in the future);
 * a schema-drifted partner file (a required column renamed, a column added);
 * an extra-column file that is still loadable (the JSONL file for day 6);
 * a byte-identical re-drop of an earlier file under a new name.
@@ -22,6 +23,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
@@ -46,6 +48,8 @@ CORRUPTIONS = (
     "bad_currency",
     "truncated",
     "bad_utf8",
+    "epoch_time",
+    "future_time",
 )
 BAD_BYTES_MARK = "@@BADBYTES@@"
 EXTRA_COLUMN_DAY = 5  # 0-based: the JSONL file for 2026-01-06 carries an extra `channel` key
@@ -132,6 +136,10 @@ def _rendered(row: _Row) -> dict[str, Any]:
             out["quantity"] = 0
         case "bad_currency":
             out["currency"] = "usd"
+        case "epoch_time":
+            out["event_time"] = int(e["event_time"].timestamp())  # Unix seconds, not ISO 8601
+        case "future_time":
+            out["event_time"] = "2099-01-01T00:00:00Z"
         case "bad_utf8":
             out["customer_id"] = BAD_BYTES_MARK
         case _:
@@ -253,6 +261,10 @@ def generate(out_dir: Path, *, seed: int = 42, n_orders: int = 400, n_days: int 
     for name in sorted(payloads):
         path = out_dir / name
         path.write_bytes(payloads[name])
+        # Generated files stand for drops that finished landing long ago: give them a fixed,
+        # old mtime so they pass the settle interval of the producer contract.
+        stamp = generation.as_of.timestamp()
+        os.utime(path, (stamp, stamp))
         generation.files.append(path)
 
     # Processing order is name order; the rejected file also takes a file_seq, which does not

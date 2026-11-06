@@ -10,7 +10,7 @@ from datapulse.generator import CORRUPTIONS, generate
 
 # sha256 over (name, NUL, bytes) of every file for seed 42 with default sizes. CI checks the
 # same value on Linux, so this pins that generation is platform-independent.
-GOLDEN_SEED_42 = "4325694e79d3b998076530006373d5c78fb1f7378b8a71d3ed6f6b6b81121b0b"
+GOLDEN_SEED_42 = "819cdfabb948594790685a97fe089a16fcc7dbb38b723c5f838d93e666f0080f"
 
 
 def tree_digest(files: list[Path]) -> str:

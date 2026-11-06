@@ -8,10 +8,10 @@ HEADER = b"order_id,customer_id,status,quantity,amount,currency,event_time,disco
 ROW = b"ORD-100001,CUS-12345,paid,2,19.98,EUR,2026-01-02T10:00:00Z,"
 
 
-def write(tmp_path: Path, name: str, data: bytes) -> Path:
-    path = tmp_path / name
-    path.write_bytes(data)
-    return path
+def write(tmp_path: Path, name: str, data: bytes) -> bytes:
+    """read_file takes the bytes the pipeline already read; keep a copy on disk for debugging."""
+    (tmp_path / name).write_bytes(data)
+    return data
 
 
 def test_csv_line_numbers_are_physical_and_blank_lines_skipped() -> None:

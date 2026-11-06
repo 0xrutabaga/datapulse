@@ -16,7 +16,7 @@ import duckdb
 # Table -> ORDER BY clause giving a total order over the table's primary key.
 TABLES: dict[str, str] = {
     "manifest": "file_seq",
-    "duplicate_drops": "file_name",
+    "duplicate_drops": "file_name, sha256",
     "quarantine": "file_seq, line, field",
     "orders": "order_id",
 }

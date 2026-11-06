@@ -11,7 +11,7 @@ import pytest
 from datapulse import crash, pipeline, store
 from datapulse.generator import Generation
 
-from .conftest import outputs
+from .conftest import OPTS, outputs
 
 
 def orders(db: Path) -> dict[str, tuple[object, ...]]:
@@ -25,7 +25,7 @@ def orders(db: Path) -> dict[str, tuple[object, ...]]:
 
 def test_full_run_matches_generator_ground_truth(generated: Generation, tmp_path: Path) -> None:
     db = tmp_path / "w.duckdb"
-    summary = pipeline.run(generated.files[0].parent, db)
+    summary = pipeline.run(generated.files[0].parent, db, OPTS)
 
     assert summary.count("rejected") == 1
     assert summary.count("duplicate_drop") == 1
@@ -60,9 +60,9 @@ def test_full_run_matches_generator_ground_truth(generated: Generation, tmp_path
 def test_second_run_is_a_no_op(generated: Generation, tmp_path: Path) -> None:
     db = tmp_path / "w.duckdb"
     landing = generated.files[0].parent
-    pipeline.run(landing, db)
+    pipeline.run(landing, db, OPTS)
     first = outputs(db, tmp_path / "a")
-    again = pipeline.run(landing, db)
+    again = pipeline.run(landing, db, OPTS)
     assert {o.action for o in again.outcomes} == {"already_loaded", "duplicate_drop"}
     assert outputs(db, tmp_path / "b") == first
 
@@ -70,11 +70,11 @@ def test_second_run_is_a_no_op(generated: Generation, tmp_path: Path) -> None:
 def test_redropped_file_under_new_name_is_skipped(generated: Generation, tmp_path: Path) -> None:
     db = tmp_path / "w.duckdb"
     landing = generated.files[0].parent
-    pipeline.run(landing, db)
+    pipeline.run(landing, db, OPTS)
     before = outputs(db, tmp_path / "a")
 
     shutil.copyfile(landing / "orders_2026-01-02.jsonl", landing / "zz_retry_upload.jsonl")
-    summary = pipeline.run(landing, db)
+    summary = pipeline.run(landing, db, OPTS)
     redrop = [o for o in summary.outcomes if o.file_name == "zz_retry_upload.jsonl"]
     assert [(o.action, o.detail) for o in redrop] == [
         ("duplicate_drop", "same content as orders_2026-01-02.jsonl")
@@ -102,7 +102,7 @@ def test_late_event_does_not_overwrite_newer_state(tmp_path: Path) -> None:
         encoding="utf-8",
         newline="\n",
     )
-    summary = pipeline.run(landing, tmp_path / "w.duckdb")
+    summary = pipeline.run(landing, tmp_path / "w.duckdb", OPTS)
     assert summary.outcomes[1].detail == "2 valid, 0 quarantined, 1 stale"
     state = orders(tmp_path / "w.duckdb")
     assert state["ORD-000001"][1] == "shipped"
@@ -116,7 +116,7 @@ def test_restatement_with_equal_event_time_takes_the_later_file(tmp_path: Path) 
     row = "ORD-000001,CUS-00001,paid,1,{},USD,2026-01-02T00:00:00Z,\n"
     (landing / "a.csv").write_text(header + row.format("5.00"), encoding="utf-8")
     (landing / "b.csv").write_text(header + row.format("6.00"), encoding="utf-8")
-    pipeline.run(landing, tmp_path / "w.duckdb")
+    pipeline.run(landing, tmp_path / "w.duckdb", OPTS)
     assert orders(tmp_path / "w.duckdb")["ORD-000001"][3] == Decimal("6.00")
 
 
@@ -127,9 +127,9 @@ def test_modified_file_with_same_name_is_a_new_drop(tmp_path: Path) -> None:
     path = landing / "a.csv"
     path.write_text(header + "ORD-000001,CUS-00001,paid,1,5.00,USD,2026-01-02T00:00:00Z,\n")
     db = tmp_path / "w.duckdb"
-    pipeline.run(landing, db)
+    pipeline.run(landing, db, OPTS)
     path.write_text(header + "ORD-000001,CUS-00001,shipped,1,5.00,USD,2026-01-03T00:00:00Z,\n")
-    assert pipeline.run(landing, db).outcomes[0].action == "loaded"
+    assert pipeline.run(landing, db, OPTS).outcomes[0].action == "loaded"
     assert orders(db)["ORD-000001"][1] == "shipped"
 
 
@@ -138,12 +138,12 @@ def test_unsupported_files_are_ignored(tmp_path: Path) -> None:
     landing.mkdir()
     (landing / "upload.csv.part").write_text("partial")
     (landing / "notes.txt").write_text("x")
-    assert pipeline.run(landing, tmp_path / "w.duckdb").outcomes == []
+    assert pipeline.run(landing, tmp_path / "w.duckdb", OPTS).outcomes == []
 
 
 def test_missing_landing_directory(tmp_path: Path) -> None:
     with pytest.raises(NotADirectoryError):
-        pipeline.run(tmp_path / "nope", tmp_path / "w.duckdb")
+        pipeline.run(tmp_path / "nope", tmp_path / "w.duckdb", OPTS)
 
 
 def test_error_inside_a_file_rolls_back_everything_for_that_file(
@@ -162,7 +162,7 @@ def test_error_inside_a_file_rolls_back_everything_for_that_file(
 
     monkeypatch.setattr("datapulse.store.maybe_crash", boom)
     with pytest.raises(RuntimeError, match="disk full"):
-        pipeline.run(landing, db)
+        pipeline.run(landing, db, OPTS)
     with store.connect(db, read_only=True) as con:
         names = [r[0] for r in con.execute("SELECT file_name FROM manifest").fetchall()]
         assert names == ["orders_2026-01-01.csv"]
@@ -172,7 +172,7 @@ def test_error_inside_a_file_rolls_back_everything_for_that_file(
         assert q in ([], [(1,)])
 
     monkeypatch.setattr("datapulse.store.maybe_crash", real)
-    pipeline.run(landing, db)
+    pipeline.run(landing, db, OPTS)
     clean = tmp_path / "clean.duckdb"
-    pipeline.run(landing, clean)
+    pipeline.run(landing, clean, OPTS)
     assert outputs(db, tmp_path / "a") == outputs(clean, tmp_path / "b")

@@ -14,7 +14,7 @@ import duckdb
 from pydantic import ValidationError
 
 from datapulse import __version__, pipeline, store
-from datapulse.config import load_config
+from datapulse.config import Config, load_config
 from datapulse.export import export_tables
 from datapulse.generator import generate
 from datapulse.quality import Report, run_checks, write_report
@@ -42,7 +42,7 @@ def _add_check_options(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--as-of", type=_as_of, default=None,
-        help="reference time for the freshness check (default: now, UTC)",
+        help="reference time for future-event quarantine and freshness (default: now, UTC)",
     )  # fmt: skip
 
 
@@ -63,6 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="load new landing files, then run data-quality checks")
     r.add_argument("--landing", type=Path, required=True)
     r.add_argument("--db", type=Path, required=True)
+    r.add_argument(
+        "--settle-seconds", type=float, default=None,
+        help="override [ingest] settle_seconds: minimum age of a file's mtime before it is read",
+    )  # fmt: skip
     _add_check_options(r)
 
     c = sub.add_parser("check", help="run data-quality checks only")
@@ -91,12 +95,10 @@ def print_report(report: Report, path: Path) -> None:
     print(f"  report: {path.as_posix()}  ({'passed' if report.passed else 'FAILED'})")
 
 
-def checks_and_report(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
-    as_of = args.as_of or datetime.now(UTC)
+def checks_and_report(args: argparse.Namespace, config: Config, as_of: datetime) -> int:
     report_path = args.report or args.db.parent / "report.json"
     with store.connect(args.db, read_only=True) as con:
-        report = run_checks(con, config.checks, as_of)
+        report = run_checks(con, config.checks, as_of, config.ingest.max_future_skew_hours)
     write_report(report, report_path)
     print_report(report, report_path)
     return EXIT_OK if report.passed else EXIT_CHECKS_FAILED
@@ -114,14 +116,21 @@ def _dispatch(args: argparse.Namespace) -> int:
             print(f"wrote {len(gen.files)} files to {args.out.as_posix()} (seed {args.seed})")
             return EXIT_OK
         case "run":
-            # Validate the config before loading anything, so a typo fails fast.
-            load_config(args.config)
-            print_summary(pipeline.run(args.landing, args.db))
-            return checks_and_report(args)
+            # Load the config before touching any file, so a typo fails fast. One as_of is used
+            # for both the future-event limit and the checks.
+            config = load_config(args.config)
+            if args.settle_seconds is not None:
+                ingest = config.ingest.model_copy(update={"settle_seconds": args.settle_seconds})
+                config = config.model_copy(update={"ingest": ingest})
+            as_of = args.as_of or datetime.now(UTC)
+            options = pipeline.RunOptions(as_of=as_of, ingest=config.ingest)
+            print_summary(pipeline.run(args.landing, args.db, options))
+            return checks_and_report(args, config, as_of)
         case "check":
             if not args.db.is_file():
                 raise FileNotFoundError(f"database not found: {args.db}")
-            return checks_and_report(args)
+            config = load_config(args.config)
+            return checks_and_report(args, config, args.as_of or datetime.now(UTC))
         case "export":
             with store.connect(args.db, read_only=True) as con:
                 for path in export_tables(con, args.out):

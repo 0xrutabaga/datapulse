@@ -26,6 +26,8 @@ class Thresholds(BaseModel):
     amount_min: Decimal = Decimal("0")
     amount_max: Decimal = Decimal("100000")
     max_freshness_lag_hours: Annotated[float, Field(gt=0)] = 24.0
+    # Valid rows repeating an (order_id, event_time) already seen in the same file.
+    max_duplicate_rate: Rate = 0.10
 
     @field_validator("max_null_rate")
     @classmethod
@@ -38,9 +40,19 @@ class Thresholds(BaseModel):
         return value
 
 
+class IngestSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Events later than as_of + this skew are quarantined; freshness also fails beyond it.
+    max_future_skew_hours: Annotated[float, Field(ge=0)] = 1.0
+    # A landing file is read only once its mtime is at least this old (producer contract).
+    settle_seconds: Annotated[float, Field(ge=0)] = 5.0
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    ingest: IngestSettings = Field(default_factory=IngestSettings)
     checks: Thresholds = Field(default_factory=Thresholds)
 
 

@@ -4,18 +4,22 @@ import hashlib
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from datapulse import store
-from datapulse.config import Thresholds
+from datapulse.config import IngestSettings, Thresholds
 from datapulse.crash import ENV_VAR
 from datapulse.export import export_tables
 from datapulse.generator import Generation, generate
+from datapulse.pipeline import RunOptions
 from datapulse.quality import run_checks, write_report
 
 AS_OF = "2026-01-09T00:00:00Z"
+# Fixed as_of (matches the generator) and no settle wait: test files are written just now.
+OPTS = RunOptions(as_of=datetime.fromisoformat(AS_OF), ingest=IngestSettings(settle_seconds=0))
 
 
 @pytest.fixture

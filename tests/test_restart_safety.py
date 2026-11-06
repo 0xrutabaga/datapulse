@@ -10,7 +10,7 @@ from datapulse import pipeline, store
 from datapulse.crash import CRASH_EXIT_CODE, POINTS, parse_spec
 from datapulse.generator import Generation
 
-from .conftest import AS_OF, digest, outputs, run_cli
+from .conftest import AS_OF, OPTS, digest, outputs, run_cli
 
 
 def cli_run(landing: Path, db: Path, crash: str | None = None) -> int:
@@ -25,7 +25,7 @@ def test_crash_then_rerun_is_byte_identical_to_clean_run(
 ) -> None:
     landing = generated.files[0].parent
     clean = tmp_path / "clean.duckdb"
-    pipeline.run(landing, clean)
+    pipeline.run(landing, clean, OPTS)
     expected = outputs(clean, tmp_path / "clean-out")
 
     crashed = tmp_path / "crashed.duckdb"
@@ -48,7 +48,7 @@ def test_repeated_crashes_on_different_files_still_converge(
 ) -> None:
     landing = generated.files[0].parent
     clean = tmp_path / "clean.duckdb"
-    pipeline.run(landing, clean)
+    pipeline.run(landing, clean, OPTS)
 
     db = tmp_path / "w.duckdb"
     assert cli_run(landing, db, "after_upsert:orders_2026-01-02.jsonl") == CRASH_EXIT_CODE

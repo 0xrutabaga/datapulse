@@ -56,7 +56,12 @@ def _rate(numerator: int, denominator: int) -> float:
     return 0.0 if denominator == 0 else round(numerator / denominator, 6)
 
 
-def run_checks(con: duckdb.DuckDBPyConnection, limits: Thresholds, as_of: datetime) -> Report:
+def run_checks(
+    con: duckdb.DuckDBPyConnection,
+    limits: Thresholds,
+    as_of: datetime,
+    max_future_skew_hours: float = 1.0,
+) -> Report:
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware")
     as_of_utc = as_of.astimezone(UTC).replace(tzinfo=None)
@@ -68,12 +73,12 @@ def run_checks(con: duckdb.DuckDBPyConnection, limits: Thresholds, as_of: dateti
     loaded = con.execute(
         "SELECT coalesce(sum(rows_read), 0), coalesce(sum(rows_valid), 0),"
         " coalesce(sum(rows_quarantined), 0), coalesce(sum(rows_superseded), 0),"
-        " coalesce(sum(rows_stale), 0), count(*)"
+        " coalesce(sum(rows_stale), 0), coalesce(sum(rows_duplicate), 0), count(*)"
         " FROM manifest WHERE status = 'loaded'"
     ).fetchone()
     if loaded is None:  # an aggregate always returns a row
         raise RuntimeError("manifest aggregate returned no row")
-    read, valid, quarantined, superseded, stale, n_loaded = (int(v) for v in loaded)
+    read, valid, quarantined, superseded, stale, duplicates, n_loaded = (int(v) for v in loaded)
     q_rate = _rate(quarantined, read)
     checks.append(
         CheckResult(
@@ -113,11 +118,21 @@ def run_checks(con: duckdb.DuckDBPyConnection, limits: Thresholds, as_of: dateti
 
     latest = _scalar(con, "SELECT max(event_time) FROM orders")
     lag = None if latest is None else round((as_of_utc - latest).total_seconds() / 3600, 3)
-    fresh = lag is not None and lag <= limits.max_freshness_lag_hours
-    checks.append(CheckResult("freshness_lag_hours", fresh, lag, limits.max_freshness_lag_hours))
+    # A negative lag means events newer than as_of; beyond the allowed skew that is a failure,
+    # not "very fresh" (e.g. data loaded with a later as_of, or a producer clock running ahead).
+    fresh = lag is not None and -max_future_skew_hours <= lag <= limits.max_freshness_lag_hours
+    checks.append(
+        CheckResult(
+            "freshness_lag_hours", fresh, lag,
+            {"min": -max_future_skew_hours, "max": limits.max_freshness_lag_hours},
+        )
+    )  # fmt: skip
 
-    dupes = int(_scalar(con, "SELECT count(*) - count(DISTINCT order_id) FROM orders"))
-    checks.append(CheckResult("duplicate_keys", dupes == 0, dupes, 0))
+    d_rate = _rate(duplicates, valid)
+    checks.append(
+        CheckResult("duplicate_rate", d_rate <= limits.max_duplicate_rate, d_rate,
+                    limits.max_duplicate_rate)
+    )  # fmt: skip
 
     drops = con.execute(
         "SELECT d.file_name, m.file_name FROM duplicate_drops d"
@@ -142,6 +157,7 @@ def run_checks(con: duckdb.DuckDBPyConnection, limits: Thresholds, as_of: dateti
             "quarantined": quarantined,
             "superseded_in_file": superseded,
             "stale": stale,
+            "duplicate_in_file": duplicates,
             "orders": orders,
         },
         quarantine_by_field={str(f): int(n) for f, n in by_field},

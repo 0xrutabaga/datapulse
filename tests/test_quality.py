@@ -15,7 +15,7 @@ from datapulse.config import Thresholds, load_config
 from datapulse.generator import Generation
 from datapulse.quality import run_checks
 
-from .conftest import AS_OF, run_cli
+from .conftest import AS_OF, OPTS, run_cli
 
 AS_OF_DT = datetime(2026, 1, 9, tzinfo=UTC)
 
@@ -23,7 +23,7 @@ AS_OF_DT = datetime(2026, 1, 9, tzinfo=UTC)
 @pytest.fixture
 def loaded_db(generated: Generation, tmp_path: Path) -> Path:
     db = tmp_path / "w.duckdb"
-    pipeline.run(generated.files[0].parent, db)
+    pipeline.run(generated.files[0].parent, db, OPTS)
     return db
 
 

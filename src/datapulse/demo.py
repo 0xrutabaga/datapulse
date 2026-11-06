@@ -21,12 +21,17 @@ from datapulse.quality import Report, run_checks, write_report
 
 MARKER = ".datapulse-demo"
 CRASH_FILE = "orders_2026-01-05.csv"
-DEMO_CONFIG_TOML = """# Thresholds used by `datapulse demo`, written next to the demo data.
+DEMO_CONFIG_TOML = """# Settings used by `datapulse demo`, written next to the demo data.
+[ingest]
+max_future_skew_hours = 1
+settle_seconds = 5  # generated files carry an old mtime, so they are already settled
+
 [checks]
 min_orders = 100
 max_quarantine_rate = 0.05
 max_rejected_files = 1  # the generator's schema-drifted partner file
 max_freshness_lag_hours = 24
+max_duplicate_rate = 0.1
 amount_min = 0
 amount_max = 100000
 
@@ -59,7 +64,11 @@ def _outputs(db: Path, out: Path, report_path: Path, report: Report) -> dict[str
 
 def _checks(db: Path, as_of: datetime) -> Report:
     with store.connect(db, read_only=True) as con:
-        return run_checks(con, DEMO_CONFIG.checks, as_of)
+        return run_checks(con, DEMO_CONFIG.checks, as_of, DEMO_CONFIG.ingest.max_future_skew_hours)
+
+
+def _options(as_of: datetime) -> pipeline.RunOptions:
+    return pipeline.RunOptions(as_of=as_of, ingest=DEMO_CONFIG.ingest)
 
 
 def _cli_run(
@@ -99,7 +108,7 @@ def run_demo(workdir: Path, *, seed: int = 42) -> int:
 
     print("\n[2/6] Reference run with no crash -> clean.duckdb")
     clean_db = workdir / "clean.duckdb"
-    print_summary(pipeline.run(landing, clean_db))
+    print_summary(pipeline.run(landing, clean_db, _options(gen.as_of)))
 
     crash = f"before_commit:{CRASH_FILE}"
     print(f"\n[3/6] Same run in a child process with {ENV_VAR}={crash} -> crashed.duckdb")
@@ -137,7 +146,7 @@ def run_demo(workdir: Path, *, seed: int = 42) -> int:
         print(f"  {name:<20} {digest[:16]}  {same}")
 
     print("\n[6/6] Run the clean pipeline again: every file is already known")
-    print_summary(pipeline.run(landing, clean_db))
+    print_summary(pipeline.run(landing, clean_db, _options(gen.as_of)))
     after = _outputs(
         clean_db, workdir / "again-export", workdir / "again-export" / "report.json",
         _checks(clean_db, gen.as_of),
@@ -153,7 +162,7 @@ def run_demo(workdir: Path, *, seed: int = 42) -> int:
 
     strict = Thresholds.model_validate({**DEMO_CONFIG.checks.model_dump(), "max_rejected_files": 0})
     with store.connect(clean_db, read_only=True) as con:
-        strict_report = run_checks(con, strict, gen.as_of)
+        strict_report = run_checks(con, strict, gen.as_of, DEMO_CONFIG.ingest.max_future_skew_hours)
     failing = [c.name for c in strict_report.checks if not c.passed]
     code = EXIT_CHECKS_FAILED if not strict_report.passed else 0
     print(

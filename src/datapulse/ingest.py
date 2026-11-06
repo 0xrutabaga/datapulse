@@ -11,9 +11,10 @@ import csv
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -69,12 +70,22 @@ def file_format(path: Path) -> FileFormat | None:
     return SUPPORTED_SUFFIXES.get(path.suffix.lower())
 
 
-def sha256_of(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 16), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def sha256_hex(data: bytes) -> str:
+    """Content hash of the exact bytes that are parsed (never re-read from disk)."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate key {key!r}")
+        obj[key] = value
+    return obj
+
+
+def _no_constants(name: str) -> Any:
+    raise ValueError(f"{name} is not a number")
 
 
 def _physical_lines(data: bytes) -> list[tuple[int, bytes]]:
@@ -134,18 +145,28 @@ def parse_jsonl(data: bytes) -> ParsedFile:
     for number, raw in _physical_lines(data):
         shown = _shown(raw)
         try:
-            # parse_float=Decimal keeps "19.99" exact instead of a binary float.
-            obj = json.loads(raw.decode("utf-8"), parse_float=Decimal)
+            # parse_float=Decimal keeps "19.99" exact instead of a binary float; NaN/Infinity
+            # and repeated keys (which json.loads would silently resolve last-wins) are errors.
+            obj = json.loads(
+                raw.decode("utf-8"),
+                parse_float=Decimal,
+                parse_constant=_no_constants,
+                object_pairs_hook=_no_duplicate_keys,
+            )
         except UnicodeDecodeError as exc:
             records.append(RawRecord(number, shown, error=f"invalid UTF-8: {exc.reason}"))
             continue
         except json.JSONDecodeError as exc:
             records.append(RawRecord(number, shown, error=f"invalid JSON: {exc.msg}"))
             continue
+        except ValueError as exc:
+            records.append(RawRecord(number, shown, error=f"invalid JSON: {exc}"))
+            continue
         if not isinstance(obj, dict):
             records.append(RawRecord(number, shown, error="expected a JSON object"))
             continue
-        values = {str(k): v for k, v in obj.items() if v is not None}
+        # null and "" both mean "no value", the same as an empty CSV cell.
+        values = {str(k): v for k, v in obj.items() if v is not None and v != ""}
         seen.update(dict.fromkeys(obj))
         records.append(RawRecord(number, shown, values=values))
     return ParsedFile(columns=tuple(seen), records=records)
@@ -159,7 +180,10 @@ def check_columns(columns: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str,
     return missing, extra
 
 
-def validate_record(record: RawRecord, file_seq: int) -> ValidRow | list[QuarantineEntry]:
+def validate_record(
+    record: RawRecord, file_seq: int, not_after: datetime | None = None
+) -> ValidRow | list[QuarantineEntry]:
+    """Validate one record; `not_after` (naive UTC) is the latest acceptable event time."""
     if record.values is None:
         return [QuarantineEntry(record.line, ROW_FIELD, record.error or "unparsable", record.raw)]
     try:
@@ -173,12 +197,18 @@ def validate_record(record: RawRecord, file_seq: int) -> ValidRow | list[Quarant
             QuarantineEntry(record.line, name, "; ".join(msgs), record.raw)
             for name, msgs in sorted(reasons.items())
         ]
-    return ValidRow.from_event(event, file_seq=file_seq, line=record.line)
+    row = ValidRow.from_event(event, file_seq=file_seq, line=record.line)
+    if not_after is not None and row.event_time > not_after:
+        # Fixed text: a rerun with a different as_of must not change the quarantine bytes.
+        reason = "event_time is later than as_of plus the allowed skew"
+        return [QuarantineEntry(record.line, "event_time", reason, record.raw)]
+    return row
 
 
-def read_file(path: Path, fmt: FileFormat, file_seq: int) -> FileResult:
-    """Parse and validate a whole file. Pure apart from reading `path`."""
-    data = path.read_bytes()
+def read_file(
+    data: bytes, fmt: FileFormat, file_seq: int, not_after: datetime | None = None
+) -> FileResult:
+    """Parse and validate the bytes of one file. Pure: the caller reads (and hashes) the file."""
     parsed = parse_csv(data) if fmt == "csv" else parse_jsonl(data)
     result = FileResult(rows_read=len(parsed.records))
     if parsed.file_error is not None:
@@ -197,7 +227,7 @@ def read_file(path: Path, fmt: FileFormat, file_seq: int) -> FileResult:
             return result
 
     for record in parsed.records:
-        outcome = validate_record(record, file_seq)
+        outcome = validate_record(record, file_seq, not_after)
         if isinstance(outcome, ValidRow):
             result.valid.append(outcome)
         else:
